@@ -61,12 +61,18 @@ class Camera():
         yn = yg * an
 
         mu = self.get_mu(corners)
-        alpha = 0.5 * np.arctan((2*mu[0])/(mu[1]-mu[2]))
-        sh = np.array([xn, yn, an])
-        sv = np.array([an, 0])
-
+        alpha = 0.5 * np.arctan((2*mu[0])/(mu[1]-mu[2])) + (mu[1]<mu[2])*np.pi/2
+        sh = np.array([xn, yn, an, alpha])
+        # sv = np.array([an, 0])
+        print(alpha)
         # return sh, sv
         return sh
+
+    def get_angle(self, corners):
+
+        new_corners = np.vstack((corners, corners[:, 0]))
+
+
 
 
     def get_spherical_features(self, corners):
@@ -199,28 +205,32 @@ class Camera():
             if len(self.result) != 0:
 
                 corners = self.result[0].corners
-                
                 for i in range(4):
                     cv2.circle(image, (int(corners[i, 0]), int(corners[i ,1])), 3, (0,0,255), -1)
                     cv2.circle(image, (int(corners_d1[i, 0]), int(corners_d1[i, 1])), 3, (0,255,0), -1)
+
                 
-                self.image_pub.publish(self.bridge.cv2_to_imgmsg(image, "bgr8"))
+                
 
                 corners = np.linalg.inv(self.K).dot(np.hstack((corners, np.ones((4,1)))).T)
+                a, xg, yg = self.moments(corners)
+                s = self.K.dot(np.array([xg, yg, 1])).T
+                cv2.circle(image, (int(s[0]), int(s[1])), 3, (0,0,255), -1)
+                self.image_pub.publish(self.bridge.cv2_to_imgmsg(image, "bgr8"))
                 sh = self.get_features(corners)
                 q =  self.get_spherical_features(corners)
                 r = corners[0, 0] - corners[0, 3]
                 f =self. get_rescaled_feature(q, r)
 
-                # epsi = self.get_epsi(corners)
-                # alpha = self.get_alpha(corners)
+                epsi = self.get_epsi(corners)
+                alpha = self.get_alpha(corners)
 
-                # Lsh1, Lsh2 = Jacobian_horz(sh_star, epsi)
-                # Lsv1, Lsv2 = Jacobian_vert(sh_star, epsi, alpha)
+                Lsh1, Lsh2 = Jacobian_horz(sh_star, epsi)
+                Lsv1, Lsv2 = Jacobian_vert(sh_star, epsi, alpha)
 
-                # Lsh = np.hstack((Lsh1, Lsh2))
-                # Lsv = np.hstack((Lsv1, Lsv2))
-                # Ls  = np.linalg.pinv(np.vstack((Lsh, Lsv)))
+                Lsh = np.hstack((Lsh1, Lsh2))
+                Lsv = np.hstack((Lsv1, Lsv2))
+                Ls  = np.linalg.pinv(np.vstack((Lsh, Lsv)))
 
 
                 eh = sh - sh_star
@@ -231,13 +241,13 @@ class Camera():
 
                 # q1 = s - s_star
                
-                k_f = adaptive_gain(11, 1, 20, np.linalg.norm(eh, np.inf))
-
-                control_law_AR = R3.dot(R1.dot(k_f * eh))
+                k_f = adaptive_gain(6, 1, 20, np.linalg.norm(eh, np.inf))
+                v11 = np.linalg.pinv(Ls).dot(-k_f * eh)
+                control_law_AR = R3.dot(R1.dot(v11[:3]))
 
 
                 v = control_law_AR[:3].flatten()
-                print(v)
+                # print(v)
                 # for i in range(3):
                 #     if v[i] > 2:
                 #         v[i] = 2
@@ -247,7 +257,7 @@ class Camera():
 
                 self.vv.append(v)
                 # print(eh)
-                w = np.array([0., 0., 0.]) 
+                w = np.array([0., 0., v11[3]]) 
 
                 theta = np.linalg.norm(w)
                 if theta == 0:
@@ -265,16 +275,16 @@ class Camera():
                 T = my_dq.to_matrix()
                 t = T[:3, 3]
                 r = Quaternion.from_rotation_matrix(T[:3, :3])
-                r = Quaternion(0, 0, 0, 1)
+                # r = Quaternion(0, 0, 0, 1)
 
                 pose.pose.position.x = t[0]
                 pose.pose.position.y = t[1]
                 pose.pose.position.z = t[2]
 
-                # pose.pose.orientation.x = r.x
-                # pose.pose.orientation.y = r.y
-                # pose.pose.orientation.z = r.z
-                # pose.pose.orientation.w = r.w
+                pose.pose.orientation.x = r.x
+                pose.pose.orientation.y = r.y
+                pose.pose.orientation.z = r.z
+                pose.pose.orientation.w = r.w
                 # print(r)
                 self.pos_publisher.publish(pose)
 
@@ -391,7 +401,7 @@ def adaptive_gain(gain_zero, gain_inf, slope_zero, norm_inf):
     return lamb
 def main():
 
-    d_image = ndimage.imread('./features.png')
+    d_image = ndimage.imread('../features.png')
     d_image = cv2.cvtColor(d_image, cv2.COLOR_BGR2GRAY)
     cam = Camera(d_image, .77)
 
