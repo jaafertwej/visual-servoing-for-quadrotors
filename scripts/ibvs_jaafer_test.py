@@ -20,6 +20,7 @@ from quaternion import Quaternion
 from dualQuaternion import DualQuaternion
 from tf.transformations import euler_from_quaternion, concatenate_matrices, rotation_matrix, euler_from_matrix
 import matplotlib.pyplot as plt
+from math import * 
 
 
 class Camera():
@@ -54,25 +55,35 @@ class Camera():
         # s = corners[:2, :].reshape(8,1)
 
         a, xg, yg = self.moments(corners)
+        alpha = self.get_angle(corners)
         if mode == 'd':
             self.a = a
+            # alpha = 0
+            print('desired: {}'.format(degrees(alpha)))
+        else:
+            print('current: {}'.format(degrees(alpha)))
         an = self.depth * np.sqrt(self.a/a)
         xn = xg * an
         yn = yg * an
 
         mu = self.get_mu(corners)
-        alpha = 0.5 * np.arctan((2*mu[0])/(mu[1]-mu[2])) + (mu[1]<mu[2])*np.pi/2
+        # alpha = 0.5 * np.arctan((2*mu[0])/(mu[1]-mu[2])) + (mu[1]<mu[2])*np.pi/2
+        
         sh = np.array([xn, yn, an, alpha])
         # sv = np.array([an, 0])
-        print(alpha)
+        
         # return sh, sv
         return sh
 
     def get_angle(self, corners):
 
-        new_corners = np.vstack((corners, corners[:, 0]))
+        delta_y = corners[1, 0] - corners[1, 3]
+        delta_x = corners[0, 0] - corners[0, 3]
 
-
+        th = atan2(delta_y,delta_x)
+        # if th < 0:
+        #     th = (np.pi*2) + th
+        return th
 
 
     def get_spherical_features(self, corners):
@@ -183,8 +194,8 @@ class Camera():
             image2 = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             self.result = self.detector.detect(image2)
 
-            corners_d1 = self.detector.detect(self.d_image)[0].corners
-            corners_d = np.linalg.inv(self.K).dot(np.hstack((corners_d1, np.ones((4,1)))).T)
+            corners_d1 = self.detector.detect(self.d_image)[0].corners.T
+            corners_d = np.linalg.inv(self.K).dot(np.vstack((corners_d1, np.ones((1,4)))))
 
             R1 = rotation_matrix(180*deg2rad, (1, 0, 0))[:3, :3]
             R2 = rotation_matrix(np.pi/2, (0, 1, 0))[:3, :3]
@@ -204,23 +215,21 @@ class Camera():
 
             if len(self.result) != 0:
 
-                corners = self.result[0].corners
+                corners = self.result[0].corners.T
                 for i in range(4):
-                    cv2.circle(image, (int(corners[i, 0]), int(corners[i ,1])), 3, (0,0,255), -1)
-                    cv2.circle(image, (int(corners_d1[i, 0]), int(corners_d1[i, 1])), 3, (0,255,0), -1)
+                    cv2.circle(image, (int(corners[0, i]), int(corners[1, i])), 3, (0,0,255), -1)
+                    cv2.circle(image, (int(corners_d1[0, i]), int(corners_d1[1, i])), 3, (0,255,0), -1)
 
-                
-                
 
-                corners = np.linalg.inv(self.K).dot(np.hstack((corners, np.ones((4,1)))).T)
+                corners = np.linalg.inv(self.K).dot(np.vstack((corners, np.ones((1,4)))))
+                # print(corners*10)
                 a, xg, yg = self.moments(corners)
-                s = self.K.dot(np.array([xg, yg, 1])).T
-                cv2.circle(image, (int(s[0]), int(s[1])), 3, (0,0,255), -1)
+
                 self.image_pub.publish(self.bridge.cv2_to_imgmsg(image, "bgr8"))
                 sh = self.get_features(corners)
-                q =  self.get_spherical_features(corners)
-                r = corners[0, 0] - corners[0, 3]
-                f =self. get_rescaled_feature(q, r)
+                # q =  self.get_spherical_features(corners)
+                # r = corners[0, 0] - corners[0, 3]
+                # f =self. get_rescaled_feature(q, r)
 
                 epsi = self.get_epsi(corners)
                 alpha = self.get_alpha(corners)
@@ -234,6 +243,7 @@ class Camera():
 
 
                 eh = sh - sh_star
+                # print(eh[3])
                 self.ee.append(eh)
                 # delta = f - f_star
                 # ev = sv - sv_star
@@ -241,7 +251,8 @@ class Camera():
 
                 # q1 = s - s_star
                
-                k_f = adaptive_gain(6, 1, 20, np.linalg.norm(eh, np.inf))
+                # k_f = adaptive_gain(4, .8, 20, np.linalg.norm(eh, np.inf))
+                k_f = 2
                 v11 = np.linalg.pinv(Ls).dot(-k_f * eh)
                 control_law_AR = R3.dot(R1.dot(v11[:3]))
 
@@ -254,10 +265,9 @@ class Camera():
                 #     elif v[i] < -2:
                 #         v[i] = -2
 
-
-                self.vv.append(v)
+                self.vv.append(np.append(v, -v11[3]))
                 # print(eh)
-                w = np.array([0., 0., v11[3]]) 
+                w = np.array([0., 0., -v11[3]]) 
 
                 theta = np.linalg.norm(w)
                 if theta == 0:
@@ -403,25 +413,26 @@ def main():
 
     d_image = ndimage.imread('../features.png')
     d_image = cv2.cvtColor(d_image, cv2.COLOR_BGR2GRAY)
-    cam = Camera(d_image, .77)
+    cam = Camera(d_image, 2.42)
+
 
     rospy.spin()
 
-    label = ['vx', 'vy', 'vz']
-    label2 = ['ex', 'ey', 'ez']
-    color = ['#ed2224', '#344ea2', '#1a8585']
+    label = ['vx', 'vy', 'vz', 'wz']
+    label2 = ['ex', 'ey', 'ez', r'e$\alpha$']
+    color = ['#ed2224', '#344ea2', '#1a8585', '#F99706']
     fig = plt.figure(figsize=(10, 30))
     t1 = np.arange(0.0, len(cam.vv), 1)
     fig.add_subplot(2,1,1)
     plt.ylim([-2, 2])
-    for i in range(3):
+    for i in range(4):
         plt.plot(t1, np.array(cam.ee)[:, i], label= label2[i])
 
     plt.legend(loc='upper right')
 
     fig.add_subplot(2,1,2)
     plt.ylim([-3, 3])
-    for i in range(3):
+    for i in range(4):
         plt.plot(t1, np.array(cam.vv)[:, i], color = color[i], label= label[i])
 
     plt.legend(loc='upper right')
