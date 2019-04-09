@@ -59,9 +59,9 @@ class Camera():
         if mode == 'd':
             self.a = a
             # alpha = 0
-            print('desired: {}'.format(degrees(alpha)))
-        else:
-            print('current: {}'.format(degrees(alpha)))
+            # print('desired: {}'.format(degrees(alpha)))
+        # else:
+        #     # print('current: {}'.format(degrees(alpha)))
         an = self.depth * np.sqrt(self.a/a)
         xn = xg * an
         yn = yg * an
@@ -219,17 +219,13 @@ class Camera():
                 for i in range(4):
                     cv2.circle(image, (int(corners[0, i]), int(corners[1, i])), 3, (0,0,255), -1)
                     cv2.circle(image, (int(corners_d1[0, i]), int(corners_d1[1, i])), 3, (0,255,0), -1)
+                self.image_pub.publish(self.bridge.cv2_to_imgmsg(image, "bgr8"))
 
 
                 corners = np.linalg.inv(self.K).dot(np.vstack((corners, np.ones((1,4)))))
-                # print(corners*10)
                 a, xg, yg = self.moments(corners)
-
-                self.image_pub.publish(self.bridge.cv2_to_imgmsg(image, "bgr8"))
                 sh = self.get_features(corners)
-                # q =  self.get_spherical_features(corners)
-                # r = corners[0, 0] - corners[0, 3]
-                # f =self. get_rescaled_feature(q, r)
+
 
                 epsi = self.get_epsi(corners)
                 alpha = self.get_alpha(corners)
@@ -239,35 +235,34 @@ class Camera():
 
                 Lsh = np.hstack((Lsh1, Lsh2))
                 Lsv = np.hstack((Lsv1, Lsv2))
-                Ls  = np.linalg.pinv(np.vstack((Lsh, Lsv)))
+                Ls  = np.vstack((Lsh, Lsv))
 
 
                 eh = sh - sh_star
-                # print(eh[3])
-                self.ee.append(eh)
-                # delta = f - f_star
-                # ev = sv - sv_star
-                # e = np.hstack((eh, ev)).reshape(4,1)
+                
 
-                # q1 = s - s_star
-               
+                e_dot_estimate = None
                 # k_f = adaptive_gain(4, .8, 20, np.linalg.norm(eh, np.inf))
+                if len(self.ee) > 1 and len(self.vv) > 1:
+                    # e_estimate = (eh - self.ee[-1])/dt
+                    # e_dot_estimate = e_estimate - (Ls.dot(self.vv[-1]))
+                    e_dot_estimate = .009* np.sum(self.ee, axis=0)
+                    print(e_dot_estimate)
+                self.ee.append(eh)
+
                 k_f = 2
-                v11 = np.linalg.pinv(Ls).dot(-k_f * eh)
+                if e_dot_estimate is not None:
+                    v11 = -np.linalg.pinv(Ls).dot(k_f * eh) - np.linalg.pinv(Ls).dot(e_dot_estimate)
+                else:
+                    v11 = np.linalg.pinv(Ls).dot(-k_f * eh)
                 control_law_AR = R3.dot(R1.dot(v11[:3]))
 
 
                 v = control_law_AR[:3].flatten()
-                # print(v)
-                # for i in range(3):
-                #     if v[i] > 2:
-                #         v[i] = 2
-                #     elif v[i] < -2:
-                #         v[i] = -2
+                w = np.array([0., 0., -v11[3]]) 
 
                 self.vv.append(np.append(v, -v11[3]))
-                # print(eh)
-                w = np.array([0., 0., -v11[3]]) 
+
 
                 theta = np.linalg.norm(w)
                 if theta == 0:
@@ -308,60 +303,10 @@ class Camera():
         self.dq = DualQuaternion.from_pose(qt_t.x, qt_t.y, qt_t.z, qt_r.x, qt_r.y, qt_r.z, qt_r.w)
 
 
-def Jacobian(p, depth):
-    L = np.zeros((2*p.shape[1], 4))
-    j = 0
-    for i in range(p.shape[1]):
-#         x = (p[i, 0] - 512) * 10e-6 * .008 
-#         y = (p[i, 1] - 512) * 10e-6 * .008
-        x = p[0, i]
-        y = p[0, i]
-        z = depth
-        L[j] = np.array([-1/z, 0, x/z,  y])
-        L[j+1] = np.array([0, -1/z, y/z, -x])
-        j = j + 2
-    return L
-
 def skew(x):
     return np.array([[ 0    , -x[2] ,  x[1]],
                      [ x[2] ,  0    , -x[0]],
                      [-x[1] ,  x[0] ,  0   ]])
-
-def get_S_cr(R, t):
-    TT = np.eye(4)
-    TT[:3, :3] = R.T
-    TT[:3,  3] = skew(t).dot(R.T)[:3,  2]
-    TT[ 3, :3] = np.zeros(3)
-    TT[ 3,  3] = R.T[2, 2]
-    return TT
-
-
-def get_V_wr(dq):
-    TT = np.eye(4)
-    TT[:3, :3] = get_R_rw(dq)
-    TT[:3,  3] = np.zeros(3)
-    TT[ 3, :3] = np.zeros(3)
-    TT[ 3,  3] = np.linalg.pinv(get_G(dq))[2, 2]
-    return TT
-
-def get_R_wr(dq):
-    q = dq.q_rot
-    r, p, y = euler_from_quaternion([q.x, q.y, q.z, q.w])
-    Rx = rotation_matrix(r, (1, 0, 0))
-    Ry = rotation_matrix(p, (0, 1, 0))
-    Rz = rotation_matrix(y, (0, 0, 1))
-    return Rx.dot(Ry.dot(Rz))[:3, :3]
-
-def get_G(dq):
-    q = dq.q_rot
-    r, p, y = euler_from_quaternion([q.x, q.y, q.z, q.w])
-    G = np.eye(3)
-    G[0, 2] = np.sin(p)
-    G[1, 1] = np.cos(r)
-    G[1, 2] = np.sin(r) * np.cos(p) * -1
-    G[2, 1] = np.sin(r)
-    G[2, 2] = np.cos(r) * np.cos(p)
-    return G
 
 
 def Jacobian_horz(sh, epsi):
@@ -389,15 +334,6 @@ def Jacobian_vert(sv, epsi, alpha):
 
     return Lsv1, Lsv2
 
-def get_Ps(Lsh1, Lsh2, Lsv1, Lsv2, R_cr, t_rc):
-
-    Psh1 = -Lsh1.dot(R_cr)
-    Psh2 =  Psh1.dot(skew(t_rc)) + Lsh2.dot(R_cr)
-
-    Psv1 = -Lsv1.dot(R_cr)
-    Psv2 =  Psv1.dot(skew(t_rc)) + Lsv2.dot(R_cr)
-
-    return Psh1, Psh2, Psv1, Psv2
 
 def get_dual(q_rot, translation):
     q_t = Quaternion(translation[0], translation[1], translation[2], 0)
@@ -409,11 +345,12 @@ def adaptive_gain(gain_zero, gain_inf, slope_zero, norm_inf):
     c = gain_inf
     lamb = a * np.exp(-b * norm_inf) + c
     return lamb
+
 def main():
 
     d_image = ndimage.imread('../features.png')
     d_image = cv2.cvtColor(d_image, cv2.COLOR_BGR2GRAY)
-    cam = Camera(d_image, 2.42)
+    cam = Camera(d_image, 2)
 
 
     rospy.spin()
