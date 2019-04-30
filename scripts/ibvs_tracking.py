@@ -223,7 +223,6 @@ class Camera():
 
 
                 corners = np.linalg.inv(self.K).dot(np.vstack((corners, np.ones((1,4)))))
-                a, xg, yg = self.moments(corners)
                 sh = self.get_features(corners)
 
 
