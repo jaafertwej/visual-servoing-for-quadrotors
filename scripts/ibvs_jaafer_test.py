@@ -21,7 +21,10 @@ from dualQuaternion import DualQuaternion
 from tf.transformations import euler_from_quaternion, concatenate_matrices, rotation_matrix, euler_from_matrix
 import matplotlib.pyplot as plt
 from math import * 
+from scipy.spatial.transform import Rotation as Rot
 
+from mpl_toolkits.mplot3d import Axes3D
+import matplotlib
 
 class Camera():
 
@@ -42,10 +45,15 @@ class Camera():
         image_topic = "/hummingbird/camera_nadir/image_raw"
         rospy.Subscriber('/hummingbird/ground_truth/pose', Pose, self.T_callback)
         rospy.sleep(.5)
-
+        rospy.Subscriber('/hummingbird/ground_truth/imu', Imu, self.imu_rotation)
         rospy.Subscriber(image_topic, Image, self.image_callback)        
         self.vv = []
         self.ee = []
+        self.traces = []
+        self.tragactory_2d_1 = []
+        self.tragactory_2d_2 = []
+        self.tragactory_2d_3 = []
+        self.tragactory_2d_4 = []
         self.pos_publisher = rospy.Publisher('/hummingbird/command/pose', PoseStamped, queue_size=1)
         self.image_pub = rospy.Publisher('modified_image', Image, queue_size=10)
 
@@ -60,10 +68,10 @@ class Camera():
             self.a = a
             # alpha = 0
             # an = 1/np.sqrt(self.a)
-            print('desired: {}'.format(self.a))
-        else:
-            # an = 1/np.sqrt(a)
-            print('current: {}'.format(a))
+            # print('desired: {}'.format(self.a))
+        # else:
+        # #     # an = 1/np.sqrt(a)
+        #     print('current: {}'.format(a))
         an = self.depth * np.sqrt(self.a/a)
         xn = xg * an
         yn = yg * an
@@ -71,7 +79,7 @@ class Camera():
         # mu = self.get_mu(corners)
         # alpha = 0.5 * np.arctan((2*mu[0])/(mu[1]-mu[2])) + (mu[1]<mu[2])*np.pi/2
         
-        sh = np.array([xn, yn, an, alpha])
+        sh = np.array([xg, yg, an, alpha])
         # sv = np.array([an, 0])
         
         # return sh, sv
@@ -188,49 +196,83 @@ class Camera():
 
         return alpha
 
+    def imu_rotation(self, msg):
+        q = msg.orientation
+        my_rot = Rot.from_quat([q.x, q.y, q.z, q.w])
+        theta = my_rot.as_euler('zyx', degrees=True)
+        Rx = Rot.from_euler('x', theta[2], degrees=True).as_dcm()
+        Ry = Rot.from_euler('y', theta[1], degrees=True).as_dcm()
+        self.stable_R = Rx.dot(Ry)
+
+    def normalize(self, e):
+        new_e = np.zeros(4)
+        min_an = 0.323
+        max_an = 3.33
+        min_d  =  0
+        max_d  =  800
+        new_e[0] = (e[0] - min_d)/ (max_d - min_d)
+        new_e[1] = (e[1] - min_d)/ (max_d - min_d)
+        new_e[2] = (e[2] - min_an)/ (max_an - min_an)
+        new_e[3] = e[3] /(2*np.pi)
+        return new_e
+
     def image_callback(self, msg):
 
-        # try:
-            # Convert your ROS Image message to OpenCV2
-            # my_dq = self.dq
-        image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-        image2 = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        self.result = self.detector.detect(image2)
+        try:
+            #Convert your ROS Image message to OpenCV2
+            my_dq = self.dq
+            image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            image2 = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            self.result = self.detector.detect(image2)
 
-        corners_d1 = self.detector.detect(self.d_image)[0].corners.T
-        # a, xgs, ygs = self.moments(corners_d1)
-        corners_d = np.linalg.inv(self.K).dot(np.vstack((corners_d1, np.ones((1,4)))))
+            corners_d1 = self.detector.detect(self.d_image)[0].corners.T
+            self.target_corners = corners_d1
+            # a, xgs, ygs = self.moments(corners_d1)
+            # corners_d = np.linalg.inv(self.K).dot(np.vstack((corners_d1, np.ones((1,4)))))
 
-        # R1 = rotation_matrix(180*deg2rad, (1, 0, 0))[:3, :3]
-        # R2 = rotation_matrix(np.pi/2, (0, 1, 0))[:3, :3]
-        # R3 = rotation_matrix(-np.pi/2, (0, 0, 1))[:3, :3]
+            R1 = rotation_matrix(180*deg2rad, (1, 0, 0))[:3, :3]
+            R2 = rotation_matrix(np.pi/2, (0, 1, 0))[:3, :3]
+            R3 = rotation_matrix(-np.pi/2, (0, 0, 1))[:3, :3]
 
-        sh_star = self.get_features(corners_d, 'd')
-        # b = np.array([0, 0, 1])
-        # q_star = R3.dot(R1.dot(b))
-        # r_star = corners_d[0, 0] - corners_d[0, 3]
-        # f_star = self.get_rescaled_feature(q_star, r_star)
-        # s_B = np.linalg.pinv(self.K).dot(np.hstack((corners_d, np.ones((4,1)))).T)
-
-        Hz = 20
-        
-
-        dt = 1./Hz 
-
-        if len(self.result) != 0:
-
-            corners = self.result[0].corners.T
-            for i in range(4):
-                cv2.circle(image, (int(corners[0, i]), int(corners[1, i])), 3, (0,0,255), -1)
-                cv2.circle(image, (int(corners_d1[0, i]), int(corners_d1[1, i])), 3, (0,255,0), -1)
+            sh_star = self.normalize(self.get_features(corners_d1, 'd'))
+            # sh_star = self.get_features(corners_d1, 'd')
+            # b = np.array([0, 0, 1])
+            # q_star = R3.dot(R1.dot(b))
+            # r_star = corners_d[0, 0] - corners_d[0, 3]
+            # f_star = self.get_rescaled_feature(q_star, r_star)
+            # s_B = np.linalg.pinv(self.K).dot(np.hstack((corners_d, np.ones((4,1)))).T)
 
 
-            corners = np.linalg.inv(self.K).dot(np.vstack((corners, np.ones((1,4)))))
-            # print(corners*10)
+            # From body to camera (where the camera is looking forward), If the camera is looking down, remove the last rotation (R3)
+            R1 = rotation_matrix( np.pi, (1, 0, 0))[:3, :3]
+            R2 = rotation_matrix( -np.pi/2, (0, 0, 1))[:3, :3]
+            R3 = rotation_matrix( -np.pi/2, (0, 1, 0))[:3, :3]
             
 
-            self.image_pub.publish(self.bridge.cv2_to_imgmsg(image, "bgr8"))
-                sh = self.get_features(corners)
+            Hz = .9
+            
+
+            dt = 1./Hz
+
+
+            if len(self.result) != 0:
+
+                corners = self.result[0].corners.T
+                for i in range(4):
+                    cv2.circle(image, (int(corners[0, i]), int(corners[1, i])), 3, (0,0,255), -1)
+                    cv2.circle(image, (int(corners_d1[0, i]), int(corners_d1[1, i])), 3, (0,255,0), -1)
+
+                self.tragactory_2d_1.append(np.array([int(corners[0, 0]), int(corners[1, 0])]))
+                self.tragactory_2d_2.append(np.array([int(corners[0, 1]), int(corners[1, 1])]))
+                self.tragactory_2d_3.append(np.array([int(corners[0, 2]), int(corners[1, 2])]))
+                self.tragactory_2d_4.append(np.array([int(corners[0, 3]), int(corners[1, 3])]))
+
+                # corners = np.linalg.inv(self.K).dot(np.vstack((corners, np.ones((1,4)))))
+                # print(corners*10)
+
+                self.image_pub.publish(self.bridge.cv2_to_imgmsg(image, "bgr8"))
+                sh = self.normalize(self.get_features(corners))
+                # sh = self.get_features(corners)
                 # q =  self.get_spherical_features(corners)
                 # r = corners[0, 0] - corners[0, 3]
                 # f =self. get_rescaled_feature(q, r)
@@ -247,47 +289,26 @@ class Camera():
 
 
                 eh = sh - sh_star
-                # print(eh[3])
-                # self.ee.append(eh)
-                # delta = f - f_star
-                # ev = sv - sv_star
-                # e = np.hstack((eh, ev)).reshape(4,1)
 
-                # q1 = s - s_star
-               
-                # k_f = adaptive_gain(2, .3, 3, np.linalg.norm(eh, np.inf))
-                # # print(k_f)
-                # # k_f = 2
-                # v11 = np.linalg.pinv(Ls).dot(-k_f * eh)
+                k_f0 = adaptive_gain(1, .01, 1, np.linalg.norm(eh, np.inf))
+                k_f1 = adaptive_gain(1, .01, 1, np.linalg.norm(eh, np.inf))
+                k_f2 = adaptive_gain(.7, .1, 1, np.linalg.norm(eh, np.inf))
+                k_f3 = adaptive_gain(3, 1, 30, np.linalg.norm(eh, np.inf))
 
-                e_dot_estimate = None
-                # k_f = adaptive_gain(4, .8, 20, np.linalg.norm(eh, np.inf))
-                # if len(self.ee) > 1 and len(self.vv) > 1:
-                #     # e_estimate = (eh - self.ee[-1])/dt
-                #     # e_dot_estimate = e_estimate - (Ls.dot(self.vv[-1]))
-                #     e_dot_estimate = .01* np.sum(self.ee, axis=0)
-                #     print(e_dot_estimate)
+
                 self.ee.append(eh)
 
-                k_f = 1.5
-                # if e_dot_estimate is not None:
-                #     v11 = -np.linalg.pinv(Ls).dot(k_f * eh) - np.linalg.pinv(Ls).dot(e_dot_estimate)
-                # else:
-                v11 = np.linalg.pinv(Ls).dot(-k_f * eh)
-                control_law_AR = R3.dot(R1.dot(v11[:3]))
+                k_f = np.eye(4) * [k_f0, k_f1, k_f2, k_f3]
+                # k_f = np.eye(4)  * .5
+
+                v11 = np.linalg.pinv(Ls).dot(-k_f.dot(eh))
+                control_law_AR = R2.dot(R1.dot(v11[:3]))
 
 
                 v = control_law_AR[:3].flatten()
-                # print(v)
-                # for i in range(3):
-                #     if v[i] > 2:
-                #         v[i] = 2
-                #     elif v[i] < -2:
-                #         v[i] = -2
+                w = np.array([0., 0., -v11[3]]).flatten()
 
                 self.vv.append(np.append(v, -v11[3]))
-                # print(eh)
-                w = np.array([0., 0., -v11[3]]) 
 
                 theta = np.linalg.norm(w)
                 if theta == 0:
@@ -296,7 +317,6 @@ class Camera():
                     u = (w/np.linalg.norm(w)).flatten()
 
                 r = Quaternion.from_angle_axis(dt * theta, u)
-
                 dq_update = get_dual(r, dt * v)
                 my_dq =  my_dq * dq_update
 
@@ -305,18 +325,18 @@ class Camera():
                 T = my_dq.to_matrix()
                 t = T[:3, 3]
                 r = Quaternion.from_rotation_matrix(T[:3, :3])
-                # r = Quaternion(0, 0, 0, 1)
 
                 pose.pose.position.x = t[0]
                 pose.pose.position.y = t[1]
-                pose.pose.position.z = t[2]
+                pose.pose.position.z = t[2] + 0.04
 
                 pose.pose.orientation.x = r.x
                 pose.pose.orientation.y = r.y
                 pose.pose.orientation.z = r.z
                 pose.pose.orientation.w = r.w
-                # print(r)
+
                 self.pos_publisher.publish(pose)
+                self.traces.append(pose.pose.position)
 
         except CvBridgeError, e:
             print(e)
@@ -429,34 +449,101 @@ def adaptive_gain(gain_zero, gain_inf, slope_zero, norm_inf):
     c = gain_inf
     lamb = a * np.exp(-b * norm_inf) + c
     return lamb
+
 def main():
 
     d_image = ndimage.imread('../features.png')
     d_image = cv2.cvtColor(d_image, cv2.COLOR_BGR2GRAY)
-    cam = Camera(d_image, 5)
+    cam = Camera(d_image, 2)
 
 
     rospy.spin()
 
-    # label = ['vx', 'vy', 'vz', 'wz']
-    # label2 = ['ex', 'ey', 'ez', r'e$\alpha$']
-    # color = ['#ed2224', '#344ea2', '#1a8585', '#F99706']
-    # fig = plt.figure(figsize=(10, 30))
-    # t1 = np.arange(0.0, len(cam.vv), 1)
-    # fig.add_subplot(2,1,1)
-    # plt.ylim([-10, 10])
-    # for i in range(4):
-    #     plt.plot(t1, np.array(cam.ee)[:, i], label= label2[i])
+    label = ['vx', 'vy', 'vz', 'wz']
+    label2 = ['ex', 'ey', 'ez', r'e$\alpha$']
+    color = ['#ed2224', '#344ea2', '#1a8585', '#F99706']
 
-    # plt.legend(loc='upper right')
+    fig = plt.figure(figsize=(10, 30))
 
-    # fig.add_subplot(2,1,2)
-    # plt.ylim([-10, 10])
-    # for i in range(4):
-    #     plt.plot(t1, np.array(cam.vv)[:, i], color = color[i], label= label[i])
+    t1 = np.arange(0.0, len(cam.vv)*0.05, 0.05)
+    fig.add_subplot(2,1,1)
+    plt.ylim([-1, 1])
+    for i in range(4):
+        plt.plot(t1, np.array(cam.ee)[:, i], label= label2[i])
 
-    # plt.legend(loc='upper right')
-    # plt.show()
+    plt.legend(loc='upper right')
+    plt.xlabel('Time in seconds')
+    plt.ylabel('Normalized error magnitude')
+    
+
+    fig.add_subplot(2,1,2)
+    plt.ylim([-.5, .5])
+    for i in range(4):
+        plt.plot(t1, np.array(cam.vv)[:, i], color = color[i], label= label[i])
+
+    plt.legend(loc='upper right')
+    plt.xlabel('Time in seconds')
+    plt.ylabel('Velocity in m/s')
+    plt.show()
+
+
+
+    fig = plt.figure(figsize=[20, 15])
+    ax = fig.add_subplot(111, projection='3d')
+
+
+    tragactory_3d = []
+    for i in range (len(cam.traces)):
+        p = np.zeros(3)
+        p[0] = cam.traces[i].x
+        p[1] = cam.traces[i].y
+        p[2] = cam.traces[i].z
+        tragactory_3d.append(p)
+        
+    ax.plot(*zip(*tragactory_3d),linewidth=4, c='b')
+    locator = matplotlib.ticker.MaxNLocator(nbins=4)
+    locator2 = matplotlib.ticker.MaxNLocator(nbins=3)
+    ax.xaxis.set_major_locator(locator)
+    ax.yaxis.set_major_locator(locator2)
+    ax.zaxis.set_major_locator(locator2)
+    ax.set_xlim(-1, 1)
+    ax.set_ylim(-1, 1)
+    ax.set_zlim( 1.7, 3)
+
+    plt.show()
+
+
+
+
+    fig = plt.figure(figsize=[15, 15])
+    ax = fig.add_subplot(111)
+    for c in cam.target_corners.T:
+        plt.plot(c[0], c[1],'x', c='g', markersize=20, markeredgewidth=2)
+        
+        
+    for c in [cam.tragactory_2d_1[0], cam.tragactory_2d_2[0], cam.tragactory_2d_3[0], cam.tragactory_2d_4[0]]:
+        plt.plot(c[0], c[1],'o', c='r', markersize=20, markeredgewidth=2, fillstyle='none')
+        plt.plot(c[0], c[1],'o', c='r', markersize=4)
+
+    plt.plot(*zip(*cam.tragactory_2d_1), linewidth=1)
+    plt.plot(*zip(*cam.tragactory_2d_2), linewidth=1)
+    plt.plot(*zip(*cam.tragactory_2d_3), linewidth=1)
+    plt.plot(*zip(*cam.tragactory_2d_4), linewidth=1)
+    # for c in s_A.T:
+    #     plt.plot(c[0], c[1],'x', c='g')
+
+        
+    # plt.xlabel('X')
+    plt.xlim([50,750])
+    # plt.ylabel('Y')
+    plt.ylim([50,750])
+    plt.xticks([])
+    plt.yticks([])
+    ax.spines['bottom'].set_linewidth(4)
+    ax.spines['top'].set_linewidth(4)
+    ax.spines['right'].set_linewidth(4)
+    ax.spines['left'].set_linewidth(4)
+    plt.show()
 
 if __name__ == '__main__':
     main()

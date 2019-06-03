@@ -14,6 +14,7 @@ from cv_bridge import CvBridge, CvBridgeError
 # OpenCV2 for saving an image
 import cv2
 import apriltag
+
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist, PoseStamped, Pose
 from quaternion import Quaternion
@@ -23,8 +24,6 @@ import matplotlib.pyplot as plt
 from math import * 
 from scipy.spatial.transform import Rotation as Rot
 
-from mpl_toolkits.mplot3d import Axes3D
-import matplotlib
 
 class Camera():
 
@@ -42,21 +41,20 @@ class Camera():
         self.bridge = CvBridge()
         self.detector = apriltag.Detector()
         rospy.init_node('ibvs')
-        image_topic = "/hummingbird/camera_nadir/image_raw"
-        rospy.Subscriber('/hummingbird/odometry_sensor1/odometry', Odometry, self.odom_vel)
-        rospy.Subscriber('/hummingbird/ground_truth/pose', Pose, self.T_callback)
-
+        image_topic = "/hummingbird_camera/camera_nadir/image_raw"
+        rospy.Subscriber('/hummingbird_camera/ground_truth/pose', Pose, self.T_callback)
+        rospy.Subscriber('/hummingbird_tag/odometry_sensor1/odometry', Odometry, self.odom_vel)
         rospy.sleep(.5)
-        rospy.Subscriber('/hummingbird/ground_truth/imu', Imu, self.imu_rotation)
+        rospy.Subscriber('/hummingbird_camera/ground_truth/imu', Imu, self.imu_rotation)
         rospy.Subscriber(image_topic, Image, self.image_callback)        
         self.vv = []
+        self.VC = []
         self.ee = []
         self.e_estimate = []
-        self.traces = []
-        self.max_speed = 0
-        self.pos_publisher = rospy.Publisher('/hummingbird/command/pose', PoseStamped, queue_size=1)
+        self.pos_publisher = rospy.Publisher('/hummingbird_camera/command/pose', PoseStamped, queue_size=1)
         self.image_pub = rospy.Publisher('modified_image', Image, queue_size=10)
-        self.speed_pub = rospy.Publisher('/cmd_vel_mux/input/navi', Twist, queue_size=1)
+        self.pose_tag_pub = rospy.Publisher('/hummingbird_tag/command/pose', PoseStamped, queue_size=1)
+        self.pose_xy_tag = 0
 
     def odom_vel(self, msg):
         self.velocity_estimate = msg.twist.twist.linear
@@ -254,7 +252,7 @@ class Camera():
             Hz = .9
             
 
-            dt = 1/Hz
+            dt = 1./Hz 
 
             if len(self.result) != 0:
 
@@ -284,7 +282,6 @@ class Camera():
                 Lsh = np.hstack((Lsh1, Lsh2))
                 Lsv = np.hstack((Lsv1, Lsv2))
                 Ls_original = np.vstack((Lsh, Lsv))
-
                 Ls  = np.linalg.pinv(np.vstack((Lsh, Lsv)))
 
 
@@ -300,41 +297,24 @@ class Camera():
 
                 k_f = np.eye(4) * [k_f0, k_f1, k_f2, k_f3]
 
+
                 # e estimate
-
-                vel_estimate = np.array([self.velocity_estimate.x, self.velocity_estimate.y, self.velocity_estimate.z, 0])
-                vel_estimate_camera = np.zeros(4)
-                vel_estimate_camera[:3] = R1.T.dot(R2.T.dot(vel_estimate[:3]))
-
-                if len(self.ee) > 300:
+                vel_estimate = np.zeros(4)
+                vel_estimate[:3] = R1.dot(R2.dot(R3.dot(np.array([self.velocity_estimate.x, self.velocity_estimate.y, self.velocity_estimate.z]))))
+                
+                if len(self.ee) > 1:
                     e_dot_estimate = (eh - self.ee[-1])/dt
 
                     self.e_estimate.append(e_dot_estimate - Ls_original.dot(vel_estimate))
-                    print(self.e_estimate[-1])
-                    print('error: {}'.format(eh))
-                # t = j[0]
-                # j[0] = j[1]
-                # j[1] = t
-                if len(self.e_estimate) > 0:
-                    twist = Twist()
-                    twist.linear.x = -0.5
-                    self.speed_pub.publish(twist)
-                    if len(self.e_estimate) > 20:
-                        v11 = np.linalg.pinv(Ls).dot(-k_f.dot(eh) - [0, self.max_speed/16, 0, 0])
-                    else:
-                        v11 = np.linalg.pinv(Ls).dot(-k_f.dot(eh))
+                    # print(self.e_estimate[-1])
 
-                    # print(j)
+                if len(self.e_estimate) > 1:
+                    v11 = np.linalg.pinv(Ls).dot(-k_f.dot(eh)) + np.linalg.pinv(Ls).dot(self.e_estimate[-1])
                 else:
                     v11 = np.linalg.pinv(Ls).dot(-k_f.dot(eh))
-                if self.max_speed < 4.5:
-                    self.max_speed +=.01
-                else:
-                    self.max_speed = 4.9
+                print(-k_f.dot(eh))
 
-
-                control_law_AR = R2.dot(R1.dot(v11[:3]))
-
+                control_law_AR = R3.dot(R2.dot(R1.dot(v11[:3])))
 
                 v = control_law_AR[:3].flatten()
                 w = np.array([0., 0., -v11[3]]).flatten()
@@ -353,21 +333,26 @@ class Camera():
 
 
                 pose = PoseStamped()
+                pose_tag = PoseStamped()
                 T = my_dq.to_matrix()
                 t = T[:3, 3]
                 r = Quaternion.from_rotation_matrix(T[:3, :3])
-
+                
+                # self.pose_xy_tag += .01
+                # pose_tag.pose.position.x = self.pose_xy_tag
+                # pose_tag.pose.position.y = self.pose_xy_tag
+                # pose_tag.pose.position.z = 2
                 pose.pose.position.x = t[0]
                 pose.pose.position.y = t[1]
-                pose.pose.position.z = t[2] + 0.04
+                pose.pose.position.z = t[2] + .035
 
-                pose.pose.orientation.x = r.x
-                pose.pose.orientation.y = r.y
-                pose.pose.orientation.z = r.z
-                pose.pose.orientation.w = r.w
+                pose.pose.orientation.x = 0
+                pose.pose.orientation.y = 0
+                pose.pose.orientation.z = 0.7071068
+                pose.pose.orientation.w = 0.7071068
 
                 self.pos_publisher.publish(pose)
-                self.traces.append(pose.pose.position)
+                # self.pose_tag_pub.publish(pose_tag)
 
         except CvBridgeError, e:
             print(e)
@@ -483,7 +468,7 @@ def adaptive_gain(gain_zero, gain_inf, slope_zero, norm_inf):
 
 def main():
 
-    d_image = ndimage.imread('../features.png')
+    d_image = ndimage.imread('../features_uav.png')
     d_image = cv2.cvtColor(d_image, cv2.COLOR_BGR2GRAY)
     cam = Camera(d_image, 2)
 
@@ -508,7 +493,7 @@ def main():
     
 
     fig.add_subplot(2,1,2)
-    plt.ylim([-1, 1])
+    plt.ylim([-.5, .5])
     for i in range(4):
         plt.plot(t1, np.array(cam.vv)[:, i], color = color[i], label= label[i])
 
@@ -517,31 +502,6 @@ def main():
     plt.ylabel('Velocity in m/s')
     plt.show()
 
-
-
-    fig = plt.figure(figsize=[20, 15])
-    ax = fig.add_subplot(111, projection='3d')
-
-
-    tragactory_3d = []
-    for i in range (len(cam.traces)):
-        p = np.zeros(3)
-        p[0] = cam.traces[i].x
-        p[1] = cam.traces[i].y
-        p[2] = cam.traces[i].z
-        tragactory_3d.append(p)
-        
-    ax.plot(*zip(*tragactory_3d),linewidth=4, c='b')
-    locator = matplotlib.ticker.MaxNLocator(nbins=4)
-    locator2 = matplotlib.ticker.MaxNLocator(nbins=3)
-    ax.xaxis.set_major_locator(locator)
-    ax.yaxis.set_major_locator(locator2)
-    ax.zaxis.set_major_locator(locator2)
-    # ax.set_xlim(-1, 1)
-    # ax.set_ylim(-1, 1)
-    ax.set_zlim( 1.7, 3)
-
-    plt.show()
 
 if __name__ == '__main__':
     main()
